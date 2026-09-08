@@ -130,7 +130,9 @@ class FirestoreSignalingRepository(
                 "createdAt" to now,
                 "startedAt" to now,
                 "lastHeartbeat" to now,
-                "lastHeartbeatAt" to now
+                "lastHeartbeatAt" to now,
+                "zegoRoomId" to (room.zegoRoomId.ifBlank { room.id }),
+                "zegoStreamId" to (room.zegoStreamId.ifBlank { "${room.id}_stream" })
             )
 
             fs.collection("liveRooms")
@@ -369,6 +371,9 @@ class FirestoreSignalingRepository(
                             return@mapNotNull null
                         }
 
+                        val zegoRoomId = parseString(doc, "zegoRoomId") ?: id
+                        val zegoStreamId = parseString(doc, "zegoStreamId") ?: "${id}_stream"
+
                         Log.d(TAG_DISCOVERY, "Accepted active room: docId=$docId, id=$id, title=$title, hostId=$hostId, hostName=$hostName")
                         LiveRoom(
                             id = id,
@@ -389,7 +394,9 @@ class FirestoreSignalingRepository(
                             isLive = isLive,
                             status = status,
                             createdAt = createdAt,
-                            lastHeartbeatAt = lastHeartbeatAt
+                            lastHeartbeatAt = lastHeartbeatAt,
+                            zegoRoomId = zegoRoomId,
+                            zegoStreamId = zegoStreamId
                         )
                     } catch (e: Exception) {
                         Log.e(TAG_DISCOVERY, "Error parsing active live room doc $docId: ${e.message}", e)
@@ -448,6 +455,8 @@ class FirestoreSignalingRepository(
                     val isLive = snapshot.getBoolean("isLive") ?: status.equals(STATUS_LIVE, ignoreCase = true)
                     val createdAt = parseTimestamp(snapshot, "createdAt", "startedAt") ?: System.currentTimeMillis()
                     val lastHeartbeatAt = parseTimestamp(snapshot, "lastHeartbeatAt", "lastHeartbeat") ?: createdAt
+                    val zegoRoomId = parseString(snapshot, "zegoRoomId") ?: id
+                    val zegoStreamId = parseString(snapshot, "zegoStreamId") ?: "${id}_stream"
 
                     val room = LiveRoom(
                         id = id,
@@ -468,7 +477,9 @@ class FirestoreSignalingRepository(
                         isLive = isLive,
                         status = status,
                         createdAt = createdAt,
-                        lastHeartbeatAt = lastHeartbeatAt
+                        lastHeartbeatAt = lastHeartbeatAt,
+                        zegoRoomId = zegoRoomId,
+                        zegoStreamId = zegoStreamId
                     )
                     trySend(room)
                 } catch (e: Exception) {
@@ -512,6 +523,8 @@ class FirestoreSignalingRepository(
                 val isLive = snapshot.getBoolean("isLive") ?: status.equals(STATUS_LIVE, ignoreCase = true)
                 val createdAt = parseTimestamp(snapshot, "createdAt", "startedAt") ?: System.currentTimeMillis()
                 val lastHeartbeatAt = parseTimestamp(snapshot, "lastHeartbeatAt", "lastHeartbeat") ?: createdAt
+                val zegoRoomId = parseString(snapshot, "zegoRoomId") ?: id
+                val zegoStreamId = parseString(snapshot, "zegoStreamId") ?: "${id}_stream"
 
                 LiveRoom(
                     id = id,
@@ -532,7 +545,9 @@ class FirestoreSignalingRepository(
                     isLive = isLive,
                     status = status,
                     createdAt = createdAt,
-                    lastHeartbeatAt = lastHeartbeatAt
+                    lastHeartbeatAt = lastHeartbeatAt,
+                    zegoRoomId = zegoRoomId,
+                    zegoStreamId = zegoStreamId
                 )
             } else {
                 null

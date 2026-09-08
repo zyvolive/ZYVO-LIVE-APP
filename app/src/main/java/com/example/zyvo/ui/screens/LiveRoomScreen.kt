@@ -152,26 +152,33 @@ fun LiveRoomScreen(
     val currentUserParticipant = currentRoomParticipants.find { it.identity == viewModel.currentUserIdentity }
     val isHandRaised = currentUserParticipant?.isRequestedToCall == true || currentUserParticipant?.isReqToPresent == true
 
+    val zegoConnectionState by viewModel.mediaConnectionState.collectAsState()
+    val isZegoPublishing by viewModel.isPublishing.collectAsState()
+    val isZegoPlaying by viewModel.isPlaying.collectAsState()
+    val zegoRemoteStreams by viewModel.remoteStreams.collectAsState()
+
+    val hostRemoteStream = zegoRemoteStreams.firstOrNull()
+    val hostStreamId = hostRemoteStream?.streamId ?: room.zegoStreamId.ifBlank { "${room.id}_stream" }
+
     val activeVideoComposable: (@Composable () -> Unit)? = if (isHost) {
-        if (!isVideoMuted && localVideoTrack != null) {
+        if (!isVideoMuted) {
             {
-                WebRtcVideoView(
-                    videoTrack = localVideoTrack,
+                ZegoVideoView(
+                    isHost = true,
                     isMirror = isFrontCamera,
                     modifier = Modifier.fillMaxSize()
                 )
             }
         } else null
     } else {
-        if (remoteVideoTrack != null) {
-            {
-                WebRtcVideoView(
-                    videoTrack = remoteVideoTrack,
-                    isMirror = false,
-                    modifier = Modifier.fillMaxSize()
-                )
-            }
-        } else null
+        {
+            ZegoVideoView(
+                isHost = false,
+                streamId = hostStreamId,
+                isMirror = false,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
     }
 
     Scaffold(
@@ -528,7 +535,14 @@ fun LiveRoomScreen(
                         DiagnosticRow("Room ID", room.id)
                         DiagnosticRow("Current UID", currentUid)
                         DiagnosticRow("Role", if (isHost) "HOST" else "VIEWER")
+                        DiagnosticRow("ZEGO Media State", zegoConnectionState.name)
+                        DiagnosticRow("ZEGO Publishing", if (isZegoPublishing) "ACTIVE" else "OFF")
+                        DiagnosticRow("ZEGO Playing", if (isZegoPlaying) "ACTIVE" else "OFF")
+                        DiagnosticRow("ZEGO Stream ID", hostStreamId)
+                        DiagnosticRow("ZEGO Remote Streams", "${zegoRemoteStreams.size}")
                         DiagnosticRow("Signaling state", signalingStatus)
+                        DiagnosticRow("Audio Muted", if (isMicMuted) "YES" else "NO")
+                        DiagnosticRow("Camera Disabled", if (isVideoMuted) "YES" else "NO")
                         DiagnosticRow("PeerConnection state", peerConnectionState)
                         DiagnosticRow("ICE connection state", iceConnectionState)
                         DiagnosticRow("LOCAL VIDEO TRACK", if (localVideoTrack != null) "YES" else "NO")

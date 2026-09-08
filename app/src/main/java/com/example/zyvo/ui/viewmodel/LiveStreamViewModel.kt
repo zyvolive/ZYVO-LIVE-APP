@@ -22,6 +22,11 @@ import org.webrtc.IceCandidate
 import org.webrtc.SessionDescription
 import org.webrtc.VideoTrack
 import java.util.UUID
+import com.example.zyvo.BuildConfig
+import com.example.zyvo.media.LiveMediaEngine
+import com.example.zyvo.media.MediaConnectionState
+import com.example.zyvo.media.RemoteStreamInfo
+import com.example.zyvo.media.ZegoLiveMediaEngine
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -78,6 +83,13 @@ class LiveStreamViewModel(
 
     val currentUserAvatar: String
         get() = repository.currentUserAvatar
+
+    // ZEGOCLOUD Live Media Engine
+    val zegoMediaEngine: LiveMediaEngine = ZegoLiveMediaEngine.getInstance()
+    val mediaConnectionState: StateFlow<MediaConnectionState> = zegoMediaEngine.connectionState
+    val isPublishing: StateFlow<Boolean> = zegoMediaEngine.isPublishing
+    val isPlaying: StateFlow<Boolean> = zegoMediaEngine.isPlaying
+    val remoteStreams: StateFlow<List<RemoteStreamInfo>> = zegoMediaEngine.remoteStreams
 
     // Local Media Manager (Real Camera + Real Microphone)
     private var _localMediaManager: LocalMediaManager? = null
@@ -171,6 +183,7 @@ class LiveStreamViewModel(
         appContext = context.applicationContext
         repository.initPersistence(context)
         repository.startActiveRoomsObservation(signalingRepository)
+        zegoMediaEngine.initialize(context.applicationContext, BuildConfig.ZEGO_APP_ID, BuildConfig.ZEGO_APP_SIGN)
         initMedia(context)
         initWebRtc(context)
     }
@@ -320,91 +333,63 @@ class LiveStreamViewModel(
         viewerSignalingJob?.cancel()
         heartbeatJob?.cancel()
         _signalingStatus.value = "HOST_CONNECTING"
-        hostSignalingJob = viewModelScope.launch {
-            val client = getOrCreateWebRtcClient() ?: run {
-                Log.e("ZYVO_RTC", "WebRtcClient unavailable for host")
-                _signalingStatus.value = "FAILED"
-                return@launch
+
+        val ctx = appContext
+        if (ctx != null) {
+            zegoMediaEngine.initialize(ctx, BuildConfig.ZEGO_APP_ID, BuildConfig.ZEGO_APP_SIGN)
+        }
+
+        val currentUser = authCurrentUser.value
+        val hostUid = currentUser?.uid ?: currentUserIdentity
+        val hostName = currentUser?.displayName ?: currentUserName
+        val streamId = "${roomId}_stream"
+
+        Log.d("ZYVO_ROOM", "Host starting live session: roomId=$roomId, hostUid=$hostUid, streamId=$streamId")
+
+        // 0. Start host room heartbeat in Firestore
+        heartbeatJob = viewModelScope.launch {
+            while (isActive) {
+                signalingRepository.sendRoomHeartbeat(roomId)
+                delay(30_000L)
             }
-            val currentUser = authCurrentUser.value
-            val hostUid = currentUser?.uid ?: currentUserIdentity
+        }
 
-            Log.d("ZYVO_ROOM", "room created / host session starting: $roomId")
+        // 1. ZEGOCLOUD: Login host to room and publish real live camera & microphone
+        zegoMediaEngine.enableCamera(_isCameraEnabled.value)
+        zegoMediaEngine.muteMicrophone(!_isMicrophoneEnabled.value)
 
-            // 0. Start host room heartbeat
-            heartbeatJob = launch {
-                while (isActive) {
-                    signalingRepository.sendRoomHeartbeat(roomId)
-                    delay(30_000L)
+        zegoMediaEngine.loginRoom(
+            roomId = roomId,
+            userId = hostUid,
+            userName = hostName,
+            isHost = true
+        ) { loginSuccess, errorCode, errorMessage ->
+            if (loginSuccess) {
+                Log.i("ZYVO_ZEGO_ROOM_JOIN_SUCCESS", "Host joined Zego room: $roomId")
+                zegoMediaEngine.startPublishing(streamId) { pubSuccess, pubCode ->
+                    if (pubSuccess) {
+                        Log.i("ZYVO_ZEGO_PUBLISH_SUCCESS", "Host publishing live media stream $streamId active")
+                        _signalingStatus.value = "HOST_LIVE"
+                        viewModelScope.launch {
+                            signalingRepository.updateRoomStatus(roomId, FirestoreSignalingRepository.STATUS_LIVE)
+                        }
+                    } else {
+                        Log.e("ZYVO_ZEGO_PUBLISH_FAILED", "Host failed to publish stream $streamId: code $pubCode")
+                        _signalingStatus.value = "PUBLISH_FAILED"
+                    }
                 }
+            } else {
+                Log.e("ZYVO_ZEGO_ROOM_JOIN_FAILED", "Host room login failed: $errorMessage (code $errorCode)")
+                _signalingStatus.value = "ROOM_JOIN_FAILED"
             }
+        }
 
-            // 1. Start local camera & audio tracks
+        // WebRTC fallback local video track for preview compatibility
+        hostSignalingJob = viewModelScope.launch {
+            val client = getOrCreateWebRtcClient() ?: return@launch
             val vTrack = client.startLocalVideo(preferFront = _cameraFacing.value)
             client.startLocalAudio()
             _localVideoTrack.value = vTrack
-
-            // 2. Create PeerConnection
-            val pc = client.createPeerConnection()
-            if (pc == null) {
-                Log.e("ZYVO_RTC", "Failed to create PeerConnection for host")
-                _signalingStatus.value = "FAILED"
-                return@launch
-            }
-
-            // 3. Listen for local ICE candidates and publish to Firestore hostCandidates
-            launch {
-                client.generatedIceCandidates.collect { cand ->
-                    val model = IceCandidateModel.fromWebRtc(cand, senderUid = hostUid)
-                    Log.d("ZYVO_SIGNALING", "ICE candidate published: ${model.id}")
-                    signalingRepository.publishHostIceCandidate(roomId, model)
-                }
-            }
-
-            // 4. Create SDP offer
-            val offerDesc = client.createOffer()
-            if (offerDesc == null) {
-                Log.e("ZYVO_SIGNALING", "Failed to create host SDP offer")
-                _signalingStatus.value = "FAILED"
-                return@launch
-            }
-            Log.d("ZYVO_SIGNALING", "offer created")
-
-            // 5. Publish Offer to Firestore
-            val offerModel = SessionDescriptionModel.fromWebRtc(offerDesc, senderUid = hostUid)
-            val published = signalingRepository.publishOffer(roomId, offerModel)
-            if (published) {
-                Log.d("ZYVO_SIGNALING", "offer published")
-                _signalingStatus.value = "OFFER_SENT"
-            } else {
-                Log.e("ZYVO_SIGNALING", "Failed to publish offer to Firestore")
-                _signalingStatus.value = "FAILED"
-            }
-
-            // 6. Observe Answer from Viewer
-            launch {
-                signalingRepository.observeAnswer(roomId).collect { answerModel ->
-                    if (answerModel != null && answerModel.toWebRtc() != null) {
-                        val answerDesc = answerModel.toWebRtc()!!
-                        Log.d("ZYVO_SIGNALING", "answer received")
-                        val setOk = client.setRemoteDescription(answerDesc)
-                        if (setOk) {
-                            _signalingStatus.value = "ANSWER_RECEIVED"
-                        }
-                    }
-                }
-            }
-
-            // 7. Observe Viewer ICE Candidates
-            launch {
-                signalingRepository.observeViewerIceCandidates(roomId).collect { candModel ->
-                    val cand = candModel.toWebRtc()
-                    if (cand != null) {
-                        Log.d("ZYVO_SIGNALING", "ICE candidate received: ${candModel.id}")
-                        client.addIceCandidate(cand)
-                    }
-                }
-            }
         }
     }
 
@@ -414,85 +399,54 @@ class LiveStreamViewModel(
         viewerSignalingJob?.cancel()
         heartbeatJob?.cancel()
         _signalingStatus.value = "VIEWER_CONNECTING"
+
+        val ctx = appContext
+        if (ctx != null) {
+            zegoMediaEngine.initialize(ctx, BuildConfig.ZEGO_APP_ID, BuildConfig.ZEGO_APP_SIGN)
+        }
+
+        val currentUser = authCurrentUser.value
+        val viewerUid = currentUser?.uid ?: currentUserIdentity
+        val viewerName = currentUser?.displayName ?: currentUserName
+
+        Log.d("ZYVO_ROOM", "Viewer joining live session: roomId=$roomId, viewerUid=$viewerUid")
+
         viewerSignalingJob = viewModelScope.launch {
-            val client = getOrCreateWebRtcClient() ?: run {
-                Log.e("ZYVO_RTC", "WebRtcClient unavailable for viewer")
-                _signalingStatus.value = "FAILED"
+            // Validate room is LIVE in Firestore
+            val roomDoc = signalingRepository.getLiveRoom(roomId)
+            if (roomDoc != null && (!roomDoc.isLive || roomDoc.status == FirestoreSignalingRepository.STATUS_ENDED)) {
+                Log.w("ZYVO_ROOM", "Room $roomId is no longer LIVE. Aborting viewer session.")
+                _signalingStatus.value = "ROOM_ENDED"
                 return@launch
             }
-            val currentUser = authCurrentUser.value
-            val viewerUid = currentUser?.uid ?: currentUserIdentity
-
-            Log.d("ZYVO_ROOM", "room joined: $roomId (viewer: $viewerUid)")
 
             // Track viewer presence & count in Firestore
-            launch {
-                val profile = currentUserProfile.value
-                signalingRepository.addParticipant(roomId, viewerUid, profile.displayName, profile.avatarEmoji)
-                signalingRepository.incrementViewerCount(roomId)
-            }
+            val profile = currentUserProfile.value
+            signalingRepository.addParticipant(roomId, viewerUid, profile.displayName, profile.avatarEmoji)
+            signalingRepository.incrementViewerCount(roomId)
 
-            // 1. Create PeerConnection
-            val pc = client.createPeerConnection()
-            if (pc == null) {
-                Log.e("ZYVO_RTC", "Failed to create PeerConnection for viewer")
-                _signalingStatus.value = "FAILED"
-                return@launch
-            }
-
-            // 2. Listen for local ICE candidates and publish to Firestore viewerCandidates
-            launch {
-                client.generatedIceCandidates.collect { cand ->
-                    val model = IceCandidateModel.fromWebRtc(cand, senderUid = viewerUid)
-                    Log.d("ZYVO_SIGNALING", "ICE candidate published: ${model.id}")
-                    signalingRepository.publishViewerIceCandidate(roomId, model)
+            // ZEGOCLOUD: Login viewer to room
+            zegoMediaEngine.loginRoom(
+                roomId = roomId,
+                userId = viewerUid,
+                userName = viewerName,
+                isHost = false
+            ) { loginSuccess, errorCode, errorMessage ->
+                if (loginSuccess) {
+                    Log.i("ZYVO_ZEGO_ROOM_JOIN_SUCCESS", "Viewer joined Zego room: $roomId")
+                    _signalingStatus.value = "VIEWER_CONNECTED"
+                } else {
+                    Log.e("ZYVO_ZEGO_ROOM_JOIN_FAILED", "Viewer failed to join Zego room $roomId: $errorMessage (code $errorCode)")
+                    _signalingStatus.value = "ROOM_JOIN_FAILED"
                 }
             }
 
-            // 3. Observe Host ICE Candidates
-            launch {
-                signalingRepository.observeHostIceCandidates(roomId).collect { candModel ->
-                    val cand = candModel.toWebRtc()
-                    if (cand != null) {
-                        Log.d("ZYVO_SIGNALING", "ICE candidate received: ${candModel.id}")
-                        client.addIceCandidate(cand)
-                    }
-                }
-            }
-
-            // 4. Observe Room status (detect host ending room)
+            // Observe room status for host ending live
             launch {
                 signalingRepository.observeRoom(roomId).collect { updatedRoom ->
                     if (updatedRoom != null && (!updatedRoom.isLive || updatedRoom.status == FirestoreSignalingRepository.STATUS_ENDED)) {
-                        Log.d("ZYVO_ROOM", "Room ended by host: $roomId")
+                        Log.d("ZYVO_ROOM", "Room ended by host in Firestore: $roomId")
                         _signalingStatus.value = "ROOM_ENDED"
-                    }
-                }
-            }
-
-            // 5. Observe Host SDP Offer
-            var hasAnswered = false
-            launch {
-                signalingRepository.observeOffer(roomId).collect { offerModel ->
-                    if (offerModel != null && !hasAnswered) {
-                        val offerDesc = offerModel.toWebRtc()
-                        if (offerDesc != null) {
-                            Log.d("ZYVO_SIGNALING", "offer received")
-                            val setOk = client.setRemoteDescription(offerDesc)
-                            if (setOk) {
-                                val answerDesc = client.createAnswer()
-                                if (answerDesc != null) {
-                                    hasAnswered = true
-                                    Log.d("ZYVO_SIGNALING", "answer created")
-                                    val answerModel = SessionDescriptionModel.fromWebRtc(answerDesc, senderUid = viewerUid)
-                                    val pubOk = signalingRepository.publishAnswer(roomId, answerModel)
-                                    if (pubOk) {
-                                        Log.d("ZYVO_SIGNALING", "answer published")
-                                        _signalingStatus.value = "ANSWER_SENT"
-                                    }
-                                }
-                            }
-                        }
                     }
                 }
             }
@@ -518,6 +472,7 @@ class LiveStreamViewModel(
         _signalingStatus.value = "IDLE"
 
         if (roomId != null) {
+            zegoMediaEngine.leaveRoom(roomId)
             viewModelScope.launch {
                 if (isHost) {
                     signalingRepository.endLiveRoom(roomId)
@@ -1064,15 +1019,22 @@ class LiveStreamViewModel(
     fun setFilter(filter: BeautifyFilter) { repository.setFilter(filter) }
     fun toggleMic() {
         val newEnabled = !_isMicrophoneEnabled.value
+        _isMicrophoneEnabled.value = newEnabled
+        zegoMediaEngine.muteMicrophone(!newEnabled)
         _webRtcClient?.setMicrophoneEnabled(newEnabled)
         repository.toggleMic()
     }
     fun toggleVideo() {
         val newEnabled = !_isCameraEnabled.value
+        _isCameraEnabled.value = newEnabled
+        zegoMediaEngine.enableCamera(newEnabled)
         _webRtcClient?.setCameraEnabled(newEnabled)
         repository.toggleVideo()
     }
     fun flipCamera() {
+        val nextFacing = !_cameraFacing.value
+        _cameraFacing.value = nextFacing
+        zegoMediaEngine.switchCamera()
         _webRtcClient?.switchCamera()
         repository.flipCamera()
     }
@@ -1080,6 +1042,7 @@ class LiveStreamViewModel(
 
     override fun onCleared() {
         super.onCleared()
+        zegoMediaEngine.destroy()
         cleanupWebRtc()
         _localMediaManager?.release()
     }

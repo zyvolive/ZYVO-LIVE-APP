@@ -1,9 +1,25 @@
+import java.util.Properties
+import java.io.FileInputStream
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.google.services)
+}
+
+fun getEnvProperty(key: String, defaultValue: String = ""): String {
+    val envFile = rootProject.file(".env")
+    if (envFile.exists()) {
+        val props = Properties()
+        FileInputStream(envFile).use { fis ->
+            props.load(fis)
+        }
+        val value = props.getProperty(key)
+        if (!value.isNullOrBlank()) return value.trim()
+    }
+    return System.getenv(key) ?: (project.findProperty(key) as? String) ?: defaultValue
 }
 
 android {
@@ -18,6 +34,13 @@ android {
         versionName = "1.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        val zegoAppIdStr = getEnvProperty("ZEGO_APP_ID", "0")
+        val zegoAppId = zegoAppIdStr.toLongOrNull() ?: 0L
+        val zegoAppSign = getEnvProperty("ZEGO_APP_SIGN", "")
+
+        buildConfigField("long", "ZEGO_APP_ID", "${zegoAppId}L")
+        buildConfigField("String", "ZEGO_APP_SIGN", "\"$zegoAppSign\"")
     }
 
     signingConfigs {
@@ -72,6 +95,7 @@ dependencies {
     implementation(libs.androidx.camera.lifecycle)
     implementation(libs.androidx.camera.view)
     implementation(libs.stream.webrtc)
+    implementation(libs.zego.express.video)
     implementation(libs.androidx.concurrent.futures.ktx)
     implementation(libs.guava)
     implementation(libs.kotlinx.serialization.json)

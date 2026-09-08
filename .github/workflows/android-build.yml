@@ -55,7 +55,32 @@ jobs:
           fi
           echo "app/google-services.json successfully verified."
 
+      - name: Setup ZEGOCLOUD Configuration
+        env:
+          ZEGO_APP_ID: ${{ secrets.ZEGO_APP_ID }}
+          ZEGO_APP_SIGN: ${{ secrets.ZEGO_APP_SIGN }}
+        run: |
+          echo "Configuring ZEGOCLOUD environment variables..."
+          > .env
+          if [ -n "$ZEGO_APP_ID" ]; then
+            echo "ZEGO_APP_ID=$ZEGO_APP_ID" >> .env
+            echo "ZEGO_APP_ID configured from repository secret."
+          else
+            echo "ZEGO_APP_ID repository secret not present, setting default placeholder."
+            echo "ZEGO_APP_ID=0" >> .env
+          fi
+          if [ -n "$ZEGO_APP_SIGN" ]; then
+            echo "ZEGO_APP_SIGN=$ZEGO_APP_SIGN" >> .env
+            echo "ZEGO_APP_SIGN configured from repository secret."
+          else
+            echo "ZEGO_APP_SIGN repository secret not present, setting default placeholder."
+            echo "ZEGO_APP_SIGN=" >> .env
+          fi
+
       - name: Build Debug APK
+        env:
+          ZEGO_APP_ID: ${{ secrets.ZEGO_APP_ID }}
+          ZEGO_APP_SIGN: ${{ secrets.ZEGO_APP_SIGN }}
         run: ./gradlew assembleDebug --stacktrace || gradle assembleDebug
 
       - name: Upload Debug APK Artifact

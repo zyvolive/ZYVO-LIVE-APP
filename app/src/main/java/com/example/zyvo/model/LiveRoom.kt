@@ -32,5 +32,7 @@ data class LiveRoom(
     val teamState: TeamState = TeamState(),
     val streamStats: StreamStats = StreamStats(),
     val createdAt: Long = System.currentTimeMillis(),
-    val lastHeartbeatAt: Long = createdAt
+    val lastHeartbeatAt: Long = createdAt,
+    val zegoRoomId: String = id,
+    val zegoStreamId: String = "${id}_stream"
 )

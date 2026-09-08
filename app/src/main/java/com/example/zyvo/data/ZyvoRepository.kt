@@ -395,7 +395,6 @@ class ZyvoRepository(
         initializeInitialTransactions()
         initializeInitialRooms()
         initializeInitialDms()
-        startLiveSimulation()
     }
 
     private fun initializeInitialUsers() {
@@ -752,19 +751,8 @@ class ZyvoRepository(
             enableChat = true
         )
 
-        _rooms.value = listOf(
-            ceoRoom,
-            alphaRoom,
-            ansharahRoom,
-            nusratRoom,
-            maishaRoom,
-            ayeshaRoom,
-            cuteAngelRoom,
-            kingRoom,
-            dramaQueenRoom,
-            jannatRoom,
-            husnatRoom
-        )
+        // Production rule: Firestore liveRooms is the single source of truth for active rooms
+        _rooms.value = emptyList()
 
         // Pre-fill initial chat messages
         _chatMessages.value = mapOf(
@@ -1082,16 +1070,22 @@ class ZyvoRepository(
 
     // === ROOMS & LIVE SIMULATION ===
 
-    fun joinRoom(roomId: String) {
-        val room = _rooms.value.find { it.id == roomId } ?: return
-        _currentRoom.value = room
+    fun joinRoom(roomId: String, fallbackRoom: LiveRoom? = null) {
+        val room = fallbackRoom ?: _rooms.value.find { it.id == roomId } ?: _currentRoom.value
+        if (room != null) {
+            _currentRoom.value = room
+        }
+
+        val authUid = com.google.firebase.auth.FirebaseAuth.getInstance().currentUser?.uid
+            ?: authRepository.currentUser.value?.uid
+            ?: currentUserIdentity
 
         // Add user as participant
         _participants.update { map ->
             val list = map[roomId] ?: emptyList()
-            val exists = list.any { it.identity == currentUserIdentity }
+            val exists = list.any { it.identity == authUid || it.identity == currentUserIdentity }
             if (!exists) {
-                map + (roomId to (list + Participant(currentUserIdentity, currentUserName, currentUserAvatar, ParticipantRole.VIEWER)))
+                map + (roomId to (list + Participant(authUid, currentUserName, currentUserAvatar, ParticipantRole.VIEWER)))
             } else map
         }
 
@@ -1104,21 +1098,19 @@ class ZyvoRepository(
         _currentRoom.value = null
     }
 
-    fun createRoom(
+    fun createRoomWithId(
+        roomId: String,
         title: String,
         roomType: RoomType,
         category: String,
         tags: List<String>,
+        hostUid: String,
         isPrivate: Boolean = false,
         password: String? = null
-    ) {
-        val authUid = com.google.firebase.auth.FirebaseAuth.getInstance().currentUser?.uid
-            ?: authRepository.currentUser.value?.uid
-            ?: currentUserIdentity
-        val newRoomId = "room_${UUID.randomUUID().toString().take(8)}"
+    ): LiveRoom {
         val initialSeats = if (roomType == RoomType.MULTI_GUEST || roomType == RoomType.AUDIO_STAGE) {
             listOf(
-                Seat(id = 1, occupied = true, assignedParticipant = authUid, participantName = "$currentUserName (Host)", avatarEmoji = currentUserAvatar, role = "HOST"),
+                Seat(id = 1, occupied = true, assignedParticipant = hostUid, participantName = "$currentUserName (Host)", avatarEmoji = currentUserAvatar, role = "HOST"),
                 Seat(id = 2, occupied = false, locked = false),
                 Seat(id = 3, occupied = false, locked = false),
                 Seat(id = 4, occupied = false, locked = false),
@@ -1128,11 +1120,12 @@ class ZyvoRepository(
         } else emptyList()
 
         val currentProfile = _currentUserProfile.value
+        val now = System.currentTimeMillis()
         val newRoom = LiveRoom(
-            id = newRoomId,
+            id = roomId,
             title = title,
-            creatorIdentity = authUid,
-            hostId = authUid,
+            creatorIdentity = hostUid,
+            hostId = hostUid,
             hostName = currentUserName,
             hostAvatar = currentUserAvatar,
             hostAvatarUrl = currentProfile.avatarUrl,
@@ -1148,16 +1141,42 @@ class ZyvoRepository(
             likesCount = 0,
             isLive = true,
             status = "LIVE",
-            createdAt = System.currentTimeMillis(),
+            createdAt = now,
+            lastHeartbeatAt = now,
             seats = initialSeats
         )
 
-        _rooms.update { listOf(newRoom) + (it.filterNot { r -> r.id == newRoomId }) }
+        _rooms.update { listOf(newRoom) + (it.filterNot { r -> r.id == roomId }) }
         _currentRoom.value = newRoom
         _participants.value = mapOf(
-            newRoomId to listOf(Participant(authUid, currentUserName, currentUserAvatar, ParticipantRole.HOST))
+            roomId to listOf(Participant(hostUid, currentUserName, currentUserAvatar, ParticipantRole.HOST))
         )
-        sendSystemMessage(newRoomId, "Broadcast Studio live stream initiated! 🔴")
+        sendSystemMessage(roomId, "Broadcast Studio live stream initiated! 🔴")
+        return newRoom
+    }
+
+    fun createRoom(
+        title: String,
+        roomType: RoomType,
+        category: String,
+        tags: List<String>,
+        isPrivate: Boolean = false,
+        password: String? = null
+    ) {
+        val authUid = com.google.firebase.auth.FirebaseAuth.getInstance().currentUser?.uid
+            ?: authRepository.currentUser.value?.uid
+            ?: currentUserIdentity
+        val newRoomId = "room_${UUID.randomUUID().toString().replace("-", "").take(10)}"
+        createRoomWithId(
+            roomId = newRoomId,
+            title = title,
+            roomType = roomType,
+            category = category,
+            tags = tags,
+            hostUid = authUid,
+            isPrivate = isPrivate,
+            password = password
+        )
     }
 
     fun updateRoomCover(roomId: String, coverUrl: String, coverStyle: String = "FULL_BACKDROP") {

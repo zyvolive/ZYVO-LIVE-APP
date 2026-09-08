@@ -77,7 +77,10 @@ fun LiveRoomScreen(
     val currentUid = authUser?.uid ?: viewModel.currentUserIdentity
     var showDiagnosticPanel by remember { mutableStateOf(false) }
 
-    val isHost = room.creatorIdentity == viewModel.currentUserIdentity
+    val isHost = room.creatorIdentity == currentUid ||
+                 room.hostId == currentUid ||
+                 room.creatorIdentity == viewModel.currentUserIdentity ||
+                 room.hostId == viewModel.currentUserIdentity
 
     var pendingPermissionCallback by remember { mutableStateOf<(() -> Unit)?>(null) }
     val permissionLauncher = rememberLauncherForActivityResult(

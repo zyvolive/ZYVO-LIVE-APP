@@ -48,12 +48,14 @@ service cloud.firestore {
       );
 
       // Only the room host can update room status, metadata, or delete the room,
-      // but any authenticated user can modify the viewerCount field.
+      // but any authenticated user can modify the viewerCount or likesCount fields.
       allow update: if isAuthenticated() && (
         resource.data.hostId == request.auth.uid ||
         resource.data.hostUid == request.auth.uid ||
         resource.data.creatorIdentity == request.auth.uid ||
-        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['viewerCount'])
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['viewerCount']) ||
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likesCount']) ||
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['viewerCount', 'likesCount'])
       );
       allow delete: if isAuthenticated() && (
         resource.data.hostId == request.auth.uid ||

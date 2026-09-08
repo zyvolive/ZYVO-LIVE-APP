@@ -21,6 +21,7 @@ import org.webrtc.AudioTrack
 import org.webrtc.IceCandidate
 import org.webrtc.SessionDescription
 import org.webrtc.VideoTrack
+import java.util.UUID
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -501,8 +502,11 @@ class LiveStreamViewModel(
     fun leaveRoomSession(isHost: Boolean) {
         val room = currentRoom.value
         val roomId = room?.id
+        val currentUid = authCurrentUser.value?.uid
+            ?: com.google.firebase.auth.FirebaseAuth.getInstance().currentUser?.uid
+            ?: currentUserIdentity
 
-        Log.d("ZYVO_ROOM", "room exited: ${roomId ?: "none"}")
+        Log.d(FirestoreSignalingRepository.TAG_ROOM_END, "leaveRoomSession: roomId=${roomId ?: "none"}, isHost=$isHost, uid=$currentUid")
         Log.d("ZYVO_SIGNALING", "signaling listeners removed")
 
         hostSignalingJob?.cancel()
@@ -516,11 +520,9 @@ class LiveStreamViewModel(
         if (roomId != null) {
             viewModelScope.launch {
                 if (isHost) {
-                    signalingRepository.updateRoomStatus(roomId, FirestoreSignalingRepository.STATUS_ENDED)
-                    signalingRepository.clearSignaling(roomId)
+                    signalingRepository.endLiveRoom(roomId)
                 } else {
-                    val viewerUid = authCurrentUser.value?.uid ?: currentUserIdentity
-                    signalingRepository.removeParticipant(roomId, viewerUid)
+                    signalingRepository.removeParticipant(roomId, currentUid)
                     signalingRepository.decrementViewerCount(roomId)
                 }
             }
@@ -857,32 +859,70 @@ class LiveStreamViewModel(
     // Room Actions
     private var isCreatingRoom = false
 
+    fun resetSignalingStatus() {
+        _signalingStatus.value = "IDLE"
+    }
+
     fun joinRoom(roomId: String) {
         viewModelScope.launch {
             _signalingStatus.value = "VIEWER_CONNECTING"
-            // Fetch/validate room from Firestore before starting session
-            signalingRepository.observeRoom(roomId).firstOrNull()?.let { roomObj ->
-                val now = System.currentTimeMillis()
-                val lastHeartbeat = roomObj.lastHeartbeatAt ?: roomObj.createdAt ?: now
-                val isFreshlyCreated = (now - roomObj.createdAt) in -600_000L..600_000L
-                val isStale = !isFreshlyCreated && ((now - lastHeartbeat) > 10 * 60 * 1000L)
-                if (roomObj.isLive && roomObj.status.equals(FirestoreSignalingRepository.STATUS_LIVE, ignoreCase = true) && !isStale && !roomObj.hostId.isNullOrEmpty()) {
-                    repository.setCurrentRoom(roomObj)
-                    repository.joinRoom(roomId)
-                } else {
-                    Log.w("ZYVO_ROOM", "Join validation failed: room $roomId is ended or stale (isLive=${roomObj.isLive}, status=${roomObj.status}, isStale=$isStale)")
-                    _signalingStatus.value = "ROOM_ENDED"
-                }
-            } ?: run {
-                Log.w("ZYVO_ROOM", "Join validation failed: room $roomId not found")
+            val currentUid: String = authCurrentUser.value?.uid
+                ?: com.google.firebase.auth.FirebaseAuth.getInstance().currentUser?.uid
+                ?: currentUserIdentity
+            Log.d(FirestoreSignalingRepository.TAG_ROOM_JOIN, "Viewer $currentUid attempting to join roomId=$roomId")
+
+            val roomObj = signalingRepository.getLiveRoom(roomId)
+            if (roomObj == null) {
+                Log.w(FirestoreSignalingRepository.TAG_ROOM_JOIN, "Join failed: room $roomId not found in Firestore")
                 _signalingStatus.value = "ROOM_ENDED"
+                return@launch
             }
+
+            if (roomObj.id != roomId) {
+                Log.w(FirestoreSignalingRepository.TAG_ROOM_JOIN, "Join failed: roomObj.id (${roomObj.id}) does not match requested roomId ($roomId)")
+                _signalingStatus.value = "ROOM_ENDED"
+                return@launch
+            }
+
+            val hostId = roomObj.hostId.takeIf { !it.isNullOrBlank() } ?: roomObj.creatorIdentity
+            if (hostId.isNullOrBlank()) {
+                Log.w(FirestoreSignalingRepository.TAG_ROOM_JOIN, "Join failed: room $roomId has no host identity")
+                _signalingStatus.value = "ROOM_ENDED"
+                return@launch
+            }
+
+            val isStatusLive = roomObj.status.equals(FirestoreSignalingRepository.STATUS_LIVE, ignoreCase = true)
+            if (!isStatusLive || !roomObj.isLive) {
+                Log.w(FirestoreSignalingRepository.TAG_ROOM_JOIN, "Join failed: room $roomId is not LIVE (status=${roomObj.status}, isLive=${roomObj.isLive})")
+                _signalingStatus.value = "ROOM_ENDED"
+                return@launch
+            }
+
+            val now = System.currentTimeMillis()
+            val lastHeartbeat = roomObj.lastHeartbeatAt ?: roomObj.createdAt ?: now
+            val isFreshlyCreated = (now - roomObj.createdAt) in -900_000L..900_000L
+            val isStale = !isFreshlyCreated && ((now - lastHeartbeat) > 15 * 60 * 1000L)
+            if (isStale) {
+                Log.w(FirestoreSignalingRepository.TAG_ROOM_JOIN, "Join failed: room $roomId is stale (lastHeartbeat=${now - lastHeartbeat}ms ago)")
+                _signalingStatus.value = "ROOM_ENDED"
+                return@launch
+            }
+
+            Log.d(FirestoreSignalingRepository.TAG_ROOM_JOIN, "Join validation passed for room $roomId (host: $hostId, title: ${roomObj.title}). Opening live room.")
+            repository.setCurrentRoom(roomObj)
+            repository.joinRoom(roomId, fallbackRoom = roomObj)
         }
     }
 
     fun leaveRoom() {
         val room = currentRoom.value
-        val isHost = room?.creatorIdentity == currentUserIdentity || room?.hostId == currentUserIdentity
+        val currentUid = authCurrentUser.value?.uid
+            ?: com.google.firebase.auth.FirebaseAuth.getInstance().currentUser?.uid
+            ?: currentUserIdentity
+        val isHost = room?.creatorIdentity == currentUid ||
+                     room?.hostId == currentUid ||
+                     room?.creatorIdentity == currentUserIdentity ||
+                     room?.hostId == currentUserIdentity
         leaveRoomSession(isHost)
         _showGiftDialog.value = false
         _showParticipantsSheet.value = false
@@ -900,30 +940,56 @@ class LiveStreamViewModel(
         password: String? = null
     ) {
         if (isCreatingRoom) {
-            Log.w("ZYVO_ROOM_CREATE", "Duplicate createRoom call ignored")
+            Log.w(FirestoreSignalingRepository.TAG_ROOM_CREATE, "Duplicate createRoom call ignored")
             return
         }
         isCreatingRoom = true
-        repository.createRoom(title, roomType, category, tags, isPrivate, password)
-        val room = repository.currentRoom.value
-        val hostUid = com.google.firebase.auth.FirebaseAuth.getInstance().currentUser?.uid
+
+        val hostUid: String? = com.google.firebase.auth.FirebaseAuth.getInstance().currentUser?.uid
             ?: authCurrentUser.value?.uid
             ?: currentUserIdentity
-
-        Log.d("ZYVO_ROOM_CREATE", "Initiating live room create: id=${room?.id}, hostUid=$hostUid, title=$title")
-        if (room != null) {
-            viewModelScope.launch {
-                try {
-                    val success = signalingRepository.createLiveRoom(room, hostUid)
-                    Log.d("ZYVO_ROOM_CREATE", "signalingRepository.createLiveRoom returned $success for ${room.id}")
-                } catch (e: Exception) {
-                    Log.e("ZYVO_ROOM_CREATE", "Failed to create live room in Firestore: ${e.message}", e)
-                } finally {
-                    isCreatingRoom = false
-                }
-            }
-        } else {
+        if (hostUid.isNullOrBlank()) {
+            Log.e(FirestoreSignalingRepository.TAG_ROOM_CREATE, "Cannot create room: host identity is missing. User must be authenticated.")
             isCreatingRoom = false
+            return
+        }
+
+        // Close any previous room for this host to avoid stale duplicate rooms
+        val prevRoom = currentRoom.value
+        if (prevRoom != null && (prevRoom.creatorIdentity == hostUid || prevRoom.hostId == hostUid)) {
+            Log.d(FirestoreSignalingRepository.TAG_ROOM_CREATE, "Closing previous host room ${prevRoom.id} before creating new room")
+            viewModelScope.launch {
+                signalingRepository.endLiveRoom(prevRoom.id)
+            }
+        }
+
+        val newRoomId = "room_${UUID.randomUUID().toString().replace("-", "").take(10)}"
+        Log.d(FirestoreSignalingRepository.TAG_ROOM_CREATE, "Creating live room: id=$newRoomId, hostUid=$hostUid, title=$title")
+
+        val room = repository.createRoomWithId(
+            roomId = newRoomId,
+            title = title,
+            roomType = roomType,
+            category = category,
+            tags = tags,
+            hostUid = hostUid,
+            isPrivate = isPrivate,
+            password = password
+        )
+
+        viewModelScope.launch {
+            try {
+                val success = signalingRepository.createLiveRoom(room, hostUid)
+                if (success) {
+                    Log.d(FirestoreSignalingRepository.TAG_ROOM_CREATE, "Live room $newRoomId successfully created in Firestore for host $hostUid")
+                } else {
+                    Log.e(FirestoreSignalingRepository.TAG_ROOM_CREATE, "Failed to create live room $newRoomId in Firestore")
+                }
+            } catch (e: Exception) {
+                Log.e(FirestoreSignalingRepository.TAG_ROOM_CREATE, "Exception creating live room in Firestore: ${e.message}", e)
+            } finally {
+                isCreatingRoom = false
+            }
         }
         _showCreateRoomSheet.value = false
     }

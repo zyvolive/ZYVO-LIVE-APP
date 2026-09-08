@@ -2555,7 +2555,7 @@ fun HomeSearchModal(
                                     LazyRow(
                                         horizontalArrangement = Arrangement.spacedBy(12.dp)
                                     ) {
-                                        items(filteredRooms) { room ->
+                                        items(filteredRooms, key = { it.id }) { room ->
                                             SquareLiveRoomCard(
                                                 room = room,
                                                 onClick = { onRoomClick?.invoke(room) }

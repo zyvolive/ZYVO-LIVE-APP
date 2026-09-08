@@ -48,6 +48,9 @@ class FirestoreSignalingRepository(
         private const val TAG_ROOM = "ZYVO_ROOM"
         const val TAG_ROOM_CREATE = "ZYVO_ROOM_CREATE"
         const val TAG_DISCOVERY = "ZYVO_DISCOVERY"
+        const val TAG_ROOM_JOIN = "ZYVO_ROOM_JOIN"
+        const val TAG_HEARTBEAT = "ZYVO_HEARTBEAT"
+        const val TAG_ROOM_END = "ZYVO_ROOM_END"
 
         const val STATUS_CREATED = "CREATED"
         const val STATUS_LIVE = "LIVE"
@@ -156,9 +159,10 @@ class FirestoreSignalingRepository(
                     "lastHeartbeat" to now
                 ))
                 .awaitResult()
+            Log.d(TAG_HEARTBEAT, "Room $roomId heartbeat sent at $now")
             true
         } catch (e: Exception) {
-            Log.e(TAG_ROOM, "Failed to send room heartbeat for $roomId: ${e.message}")
+            Log.e(TAG_HEARTBEAT, "Failed to send room heartbeat for $roomId: ${e.message}")
             false
         }
     }
@@ -181,10 +185,40 @@ class FirestoreSignalingRepository(
                 )
                 .awaitResult()
 
-            Log.d(TAG_ROOM, "Room $roomId status updated to: $status")
+            if (status == STATUS_ENDED) {
+                Log.d(TAG_ROOM_END, "Room $roomId status updated to ENDED in Firestore")
+            } else {
+                Log.d(TAG_ROOM, "Room $roomId status updated to: $status")
+            }
             true
         } catch (e: Exception) {
             Log.e(TAG_ROOM, "Failed to update room status: ${e.message}", e)
+            false
+        }
+    }
+
+    /**
+     * Closes and ends a live room in Firestore, marking it ENDED and cleaning up signaling data.
+     */
+    suspend fun endLiveRoom(roomId: String): Boolean = withContext(Dispatchers.IO) {
+        val fs = firestore ?: return@withContext false
+        try {
+            val now = System.currentTimeMillis()
+            fs.collection("liveRooms")
+                .document(roomId)
+                .update(
+                    mapOf(
+                        "status" to STATUS_ENDED,
+                        "isLive" to false,
+                        "endedAt" to now
+                    )
+                )
+                .awaitResult()
+            Log.d(TAG_ROOM_END, "Room $roomId successfully marked as ENDED in Firestore")
+            clearSignaling(roomId)
+            true
+        } catch (e: Exception) {
+            Log.e(TAG_ROOM_END, "Failed to end live room $roomId in Firestore: ${e.message}", e)
             false
         }
     }
@@ -326,11 +360,11 @@ class FirestoreSignalingRepository(
                         }
 
                         // Heartbeat / stale room check with clock-skew protection:
-                        // 1. If freshly created within 10 minutes, always allow.
-                        // 2. Otherwise require lastHeartbeat within 10 minutes.
+                        // 1. If freshly created within 15 minutes, always allow.
+                        // 2. Otherwise require lastHeartbeat within 15 minutes.
                         val timeSinceHeartbeat = now - lastHeartbeatAt
-                        val isFreshlyCreated = (now - createdAt) in -600_000L..600_000L
-                        if (!isFreshlyCreated && timeSinceHeartbeat > 10 * 60 * 1000L) {
+                        val isFreshlyCreated = (now - createdAt) in -900_000L..900_000L
+                        if (!isFreshlyCreated && timeSinceHeartbeat > 15 * 60 * 1000L) {
                             Log.w(TAG_DISCOVERY, "Skipping doc $docId: stale heartbeat (lastHeartbeat=${timeSinceHeartbeat}ms ago)")
                             return@mapNotNull null
                         }
@@ -448,6 +482,64 @@ class FirestoreSignalingRepository(
         awaitClose {
             Log.d(TAG_ROOM, "signaling listeners removed (room): $roomId")
             registration.remove()
+        }
+    }
+
+    /**
+     * One-shot fetch and parse of a live room document directly from Firestore for join validation.
+     */
+    suspend fun getLiveRoom(roomId: String): LiveRoom? = withContext(Dispatchers.IO) {
+        val fs = firestore ?: return@withContext null
+        try {
+            val snapshot = fs.collection("liveRooms").document(roomId).get().awaitResult()
+            if (snapshot != null && snapshot.exists()) {
+                val id = parseString(snapshot, "id", "roomId") ?: roomId
+                val title = parseString(snapshot, "title") ?: "Live Stream"
+                val description = parseString(snapshot, "description") ?: ""
+                val hostId = parseString(snapshot, "hostId", "hostUid", "creatorIdentity") ?: ""
+                val hostName = parseString(snapshot, "hostName") ?: "Broadcaster"
+                val hostAvatar = parseString(snapshot, "hostAvatar") ?: "🎙️"
+                val hostAvatarUrl = parseString(snapshot, "hostAvatarUrl")
+                val hostGender = parseString(snapshot, "hostGender") ?: "Female"
+                val roomCoverUrl = parseString(snapshot, "roomCoverUrl")
+                val coverStyle = parseString(snapshot, "coverStyle") ?: "FULL_BACKDROP"
+                val roomTypeStr = parseString(snapshot, "roomType") ?: "SINGLE_LIVE"
+                val roomType = try { RoomType.valueOf(roomTypeStr) } catch (_: Exception) { RoomType.SINGLE_LIVE }
+                val category = parseString(snapshot, "category") ?: "Entertainment"
+                val viewerCount = parseLong(snapshot, "viewerCount")?.toInt() ?: 1
+                val likesCount = parseLong(snapshot, "likesCount")?.toInt() ?: 0
+                val status = parseString(snapshot, "status") ?: STATUS_LIVE
+                val isLive = snapshot.getBoolean("isLive") ?: status.equals(STATUS_LIVE, ignoreCase = true)
+                val createdAt = parseTimestamp(snapshot, "createdAt", "startedAt") ?: System.currentTimeMillis()
+                val lastHeartbeatAt = parseTimestamp(snapshot, "lastHeartbeatAt", "lastHeartbeat") ?: createdAt
+
+                LiveRoom(
+                    id = id,
+                    title = title,
+                    description = description,
+                    creatorIdentity = hostId,
+                    hostId = hostId,
+                    hostName = hostName,
+                    hostAvatar = hostAvatar,
+                    hostAvatarUrl = hostAvatarUrl,
+                    hostGender = hostGender,
+                    roomCoverUrl = roomCoverUrl,
+                    coverStyle = coverStyle,
+                    roomType = roomType,
+                    category = category,
+                    viewerCount = viewerCount,
+                    likesCount = likesCount,
+                    isLive = isLive,
+                    status = status,
+                    createdAt = createdAt,
+                    lastHeartbeatAt = lastHeartbeatAt
+                )
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            Log.e(TAG_ROOM, "Failed to get room $roomId: ${e.message}", e)
+            null
         }
     }
 

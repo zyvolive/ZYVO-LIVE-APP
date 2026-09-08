@@ -82,12 +82,20 @@ fun ZyvoApp(
 
     val authErrorMessage by viewModel.authErrorMessage.collectAsState()
     val isAuthLoading by viewModel.isAuthLoading.collectAsState()
+    val signalingStatus by viewModel.signalingStatus.collectAsState()
 
     var activeSubView by remember { mutableStateOf<String?>(null) } // "wallet", "vip_center", "rankings"
 
     val context = androidx.compose.ui.platform.LocalContext.current
     LaunchedEffect(Unit) {
         viewModel.initPersistence(context.applicationContext)
+    }
+
+    LaunchedEffect(signalingStatus, currentRoom) {
+        if (signalingStatus == "ROOM_ENDED" && currentRoom == null) {
+            android.widget.Toast.makeText(context, "This live room has ended or is unavailable.", android.widget.Toast.LENGTH_SHORT).show()
+            viewModel.resetSignalingStatus()
+        }
     }
 
     val followingProfiles = remember(userProfiles, followingUserIds) {

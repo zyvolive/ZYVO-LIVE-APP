@@ -1,0 +1,94 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions for authentication & authorization
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function roomExists(roomId) {
+      return exists(/databases/$(database)/documents/liveRooms/$(roomId));
+    }
+
+    function getRoomData(roomId) {
+      return get(/databases/$(database)/documents/liveRooms/$(roomId)).data;
+    }
+
+    function isHost(roomId) {
+      return isAuthenticated() && (
+        getRoomData(roomId).hostId == request.auth.uid ||
+        getRoomData(roomId).hostUid == request.auth.uid ||
+        getRoomData(roomId).creatorIdentity == request.auth.uid
+      );
+    }
+
+    // User Profiles
+    // Authenticated users can read profiles; only the profile owner can create, update, or delete their own profile.
+    match /users/{userId} {
+      allow read: if isAuthenticated();
+      allow create, update: if isOwner(userId);
+      allow delete: if isOwner(userId);
+    }
+
+    // Live Rooms
+    match /liveRooms/{roomId} {
+      // Authenticated users can read live room metadata for discovery
+      allow read: if isAuthenticated();
+
+      // Only authenticated users can create a room with their own UID as host
+      allow create: if isAuthenticated() && (
+        request.resource.data.hostId == request.auth.uid ||
+        request.resource.data.hostUid == request.auth.uid ||
+        request.resource.data.creatorIdentity == request.auth.uid
+      );
+
+      // Only the room host can update room status, metadata, or delete the room,
+      // but any authenticated user can modify the viewerCount field.
+      allow update: if isAuthenticated() && (
+        resource.data.hostId == request.auth.uid ||
+        resource.data.hostUid == request.auth.uid ||
+        resource.data.creatorIdentity == request.auth.uid ||
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['viewerCount'])
+      );
+      allow delete: if isAuthenticated() && (
+        resource.data.hostId == request.auth.uid ||
+        resource.data.hostUid == request.auth.uid ||
+        resource.data.creatorIdentity == request.auth.uid
+      );
+
+      // WebRTC Signaling: SDP Offer and Answer
+      match /signaling/{docId} {
+        allow read: if isAuthenticated() && roomExists(roomId);
+        // SDP Offer: only writable by the room host
+        allow write: if docId == "offer" && isHost(roomId);
+        // SDP Answer: only writable by an authenticated participating viewer (non-host)
+        allow write: if docId == "answer" && isAuthenticated() && !isHost(roomId) && (
+          request.resource.data.senderUid == null || request.resource.data.senderUid == request.auth.uid
+        );
+      }
+
+      // Host ICE Candidates: only the host can publish host candidates
+      match /hostCandidates/{candidateId} {
+        allow read: if isAuthenticated() && roomExists(roomId);
+        allow write: if isHost(roomId);
+      }
+
+      // Viewer ICE Candidates: only participating viewers can publish viewer candidates
+      match /viewerCandidates/{candidateId} {
+        allow read: if isAuthenticated() && roomExists(roomId);
+        allow write: if isAuthenticated() && (!isHost(roomId) || request.resource.data.senderUid == request.auth.uid);
+      }
+
+      // Participants presence: any authenticated user can track their own presence, host can also cleanup
+      match /participants/{userId} {
+        allow read: if isAuthenticated();
+        allow write, update, delete: if isAuthenticated() && (userId == request.auth.uid || isHost(roomId));
+      }
+    }
+  }
+}

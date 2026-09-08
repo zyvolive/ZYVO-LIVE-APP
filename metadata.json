@@ -1,0 +1,8 @@
+{
+  "name": "Zyvo Live",
+  "description": "Real-time Live Streaming and Meeting Platform with Single Live, Multi-Guest Video, Audio Stage Rooms, and PK Battle Modes",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

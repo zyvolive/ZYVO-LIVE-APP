@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="purple_primary">#9D4EDD</color>
+    <color name="magenta_accent">#FF007F</color>
+    <color name="cyan_accent">#00F5D4</color>
+    <color name="dark_background">#0B0813</color>
+    <color name="dark_surface">#161224</color>
+    <color name="dark_card">#221C38</color>
+    <color name="pk_red">#FF2A6D</color>
+    <color name="pk_blue">#05D9E8</color>
+</resources>

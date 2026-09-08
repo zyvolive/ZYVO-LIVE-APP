@@ -1,0 +1,6 @@
+./dist
+node_modules/
+
+.env
+dist/
+app/google-services.json

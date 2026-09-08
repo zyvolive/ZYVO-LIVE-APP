@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Zyvo Live</string>
+    <string name="tagline">Real-time Live Streaming &amp; Meeting Studio</string>
+    <string name="single_live">Single Live</string>
+    <string name="multi_guest">Multi-Guest</string>
+    <string name="audio_stage">Audio Stage</string>
+    <string name="pk_battle">PK Battle</string>
+    <string name="team_battle">Team Mode</string>
+    <string name="go_live">Go Live</string>
+    <string name="create_room">Create Room</string>
+    <string name="join_room">Join Room</string>
+    <string name="explore_streams">Explore Streams</string>
+    <string name="studio_analytics">Studio Analytics</string>
+    <string name="end_stream">End Stream</string>
+    <string name="chat_placeholder">Say something friendly…</string>
+</resources>
